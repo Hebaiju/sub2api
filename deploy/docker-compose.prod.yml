@@ -1,6 +1,6 @@
 services:
   sub2api:
-    image: ghcr.io/hebaiju/sub2api:0.1.173
+    image: ghcr.io/hebaiju/sub2api:0.1.172.1
     container_name: sub2api
     restart: unless-stopped
     security_opt:
