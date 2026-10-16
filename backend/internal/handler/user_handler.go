@@ -2,6 +2,10 @@ package handler
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
 	"strings"
 	"time"
 
@@ -13,6 +17,95 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// GetBalanceQueryKeyStatus returns whether the account has a dedicated balance query key.
+func (h *UserHandler) GetBalanceQueryKeyStatus(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		return
+	}
+	hash, err := h.userService.GetBalanceQueryKeyHash(c.Request.Context(), subject.UserID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"enabled": hash != ""})
+}
+
+// RotateBalanceQueryKey creates a one-time-visible credential dedicated to balance queries.
+func (h *UserHandler) RotateBalanceQueryKey(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		return
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		response.InternalError(c, "Unable to create query key")
+		return
+	}
+	key := "bq_" + hex.EncodeToString(buf)
+	sum := sha256.Sum256([]byte(key))
+	if err := h.userService.SetBalanceQueryKey(c.Request.Context(), subject.UserID, hex.EncodeToString(sum[:])); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"key": key})
+}
+
+func (h *UserHandler) RevokeBalanceQueryKey(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		return
+	}
+	if err := h.userService.SetBalanceQueryKey(c.Request.Context(), subject.UserID, ""); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"enabled": false})
+}
+
+// QueryBalanceByKey is intentionally separate from gateway API-key authentication.
+func (h *UserHandler) QueryBalanceByKey(c *gin.Context) {
+	key := strings.TrimSpace(c.GetHeader("X-Balance-Query-Key"))
+	if key == "" {
+		auth := strings.TrimSpace(c.GetHeader("Authorization"))
+		if len(auth) > 7 && strings.EqualFold(auth[:7], "Bearer ") {
+			key = strings.TrimSpace(auth[7:])
+		}
+	}
+	sum := sha256.Sum256([]byte(key))
+	user, err := h.userService.GetByBalanceQueryKeyHash(c.Request.Context(), hex.EncodeToString(sum[:]))
+	if key == "" || err != nil || user == nil || user.Status != service.StatusActive {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_balance_query_key"})
+		return
+	}
+	result := gin.H{"balance": user.Balance, "frozen_balance": user.FrozenBalance, "total_recharged": user.TotalRecharged, "currency": "USD"}
+	startValue, endValue := strings.TrimSpace(c.Query("start_time")), strings.TrimSpace(c.Query("end_time"))
+	if startValue == "" && endValue == "" {
+		c.JSON(http.StatusOK, result)
+		return
+	}
+	if startValue == "" || endValue == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "start_time_and_end_time_required"})
+		return
+	}
+	start, startErr := time.Parse(time.RFC3339, startValue)
+	end, endErr := time.Parse(time.RFC3339, endValue)
+	if startErr != nil || endErr != nil || !end.After(start) || end.Sub(start) > 366*24*time.Hour {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_time_range", "message": "Use RFC3339 timestamps with end_time after start_time and a range no longer than 366 days."})
+		return
+	}
+	usage, err := h.userService.GetBalanceQueryUsage(c.Request.Context(), user.ID, start, end)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	result["usage"] = gin.H{"start_time": start.UTC().Format(time.RFC3339), "end_time": end.UTC().Format(time.RFC3339), "interval": "[start_time, end_time)", "total_requests": usage.TotalRequests, "total_input_tokens": usage.TotalInputTokens, "total_output_tokens": usage.TotalOutputTokens, "total_cache_creation_tokens": usage.TotalCacheCreationTokens, "total_cache_read_tokens": usage.TotalCacheReadTokens, "total_tokens": usage.TotalTokens, "total_cost": usage.TotalCost, "total_actual_cost": usage.TotalActualCost, "average_duration_ms": usage.AverageDurationMs}
+	c.JSON(http.StatusOK, result)
+}
 
 // UserHandler handles user-related requests
 type UserHandler struct {

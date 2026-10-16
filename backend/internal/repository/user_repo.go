@@ -193,6 +193,65 @@ func (r *userRepository) GetByID(ctx context.Context, id int64) (*service.User, 
 	return out, nil
 }
 
+func (r *userRepository) SetBalanceQueryKey(ctx context.Context, userID int64, keyHash string) error {
+	_, err := r.sql.ExecContext(ctx, `INSERT INTO user_balance_query_keys (user_id, key_hash, created_at, updated_at) VALUES ($1, $2, NOW(), NOW()) ON CONFLICT (user_id) DO UPDATE SET key_hash = EXCLUDED.key_hash, updated_at = NOW()`, userID, keyHash)
+	return err
+}
+
+func (r *userRepository) GetBalanceQueryKeyHash(ctx context.Context, userID int64) (string, error) {
+	var hash string
+	rows, err := r.sql.QueryContext(ctx, `SELECT key_hash FROM user_balance_query_keys WHERE user_id = $1`, userID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return "", rows.Err()
+	}
+	if err := rows.Scan(&hash); err != nil {
+		return "", err
+	}
+	return hash, nil
+}
+
+func (r *userRepository) GetByBalanceQueryKeyHash(ctx context.Context, keyHash string) (*service.User, error) {
+	var userID int64
+	rows, err := r.sql.QueryContext(ctx, `SELECT user_id FROM user_balance_query_keys WHERE key_hash = $1`, keyHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, service.ErrUserNotFound
+	}
+	if err := rows.Scan(&userID); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return r.GetByID(ctx, userID)
+}
+
+func (r *userRepository) GetBalanceQueryUsage(ctx context.Context, userID int64, start, end time.Time) (*service.BalanceQueryUsage, error) {
+	stats := &service.BalanceQueryUsage{}
+	query := `SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cache_creation_tokens), 0), COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(total_cost), 0), COALESCE(SUM(actual_cost), 0), COALESCE(AVG(COALESCE(duration_ms, 0)), 0) FROM usage_logs WHERE user_id = $1 AND created_at >= $2 AND created_at < $3`
+	if err := scanSingleRow(ctx, r.sql, query, []any{userID, start, end},
+		&stats.TotalRequests,
+		&stats.TotalInputTokens,
+		&stats.TotalOutputTokens,
+		&stats.TotalCacheCreationTokens,
+		&stats.TotalCacheReadTokens,
+		&stats.TotalCost,
+		&stats.TotalActualCost,
+		&stats.AverageDurationMs,
+	); err != nil {
+		return nil, err
+	}
+	stats.TotalTokens = stats.TotalInputTokens + stats.TotalOutputTokens + stats.TotalCacheCreationTokens + stats.TotalCacheReadTokens
+	return stats, nil
+}
+
 func (r *userRepository) GetByIDIncludeDeleted(ctx context.Context, id int64) (*service.User, error) {
 	ctx = mixins.SkipSoftDelete(ctx)
 	m, err := r.client.User.Query().Where(dbuser.IDEQ(id)).Only(ctx)

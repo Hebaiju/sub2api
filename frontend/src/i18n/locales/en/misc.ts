@@ -254,6 +254,9 @@ export default {
     },
     // User tour steps
     user: {
+      balanceQuery: {
+        title: 'Balance Query API', description: 'Create a dedicated key to read your current balance and total recharges as JSON. This key is separate from AI service API keys.', enabled: 'Enabled', disabled: 'Not enabled', create: 'Create query key', rotate: 'Regenerate key', revoke: 'Revoke key', oneTimeNotice: 'The key is shown only once. Copy and store it securely now.', usageParameters: 'For usage by period, provide both start_time and end_time as RFC3339 timestamps (for example, 2026-10-01T00:00:00Z). The start is inclusive, the end is exclusive, and the maximum range is 366 days.'
+      },
       welcome: {
         title: '👋 Welcome to Sub2API',
         description: '<div style="line-height: 1.8;"><p style="margin-bottom: 16px;">Hello! Welcome to the Sub2API AI service platform.</p><p style="margin-bottom: 12px;"><b>🎯 Quick Start:</b></p><ul style="margin-left: 20px; margin-bottom: 16px;"><li>🔑 Create API Key</li><li>📋 Copy key to your application</li><li>🚀 Start using AI services</li></ul><p style="color: #10b981; font-weight: 600;">Just 1 minute, let\'s get started →</p></div>',

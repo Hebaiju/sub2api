@@ -272,6 +272,9 @@ export default {
     },
     // User tour steps
     user: {
+      balanceQuery: {
+        title: '余额查询 API', description: '创建专用查询密钥，通过 JSON 接口读取当前账户余额和充值总额。此密钥与 AI 服务 API Key 相互独立。', enabled: '已启用', disabled: '未启用', create: '创建查询密钥', rotate: '重新生成密钥', revoke: '撤销密钥', oneTimeNotice: '密钥只显示这一次，请立即复制并妥善保存。', usageParameters: '按时间查询用量：同时传入 start_time 和 end_time（RFC3339，例如 2026-10-01T00:00:00Z），查询范围为含开始、不含结束，最长 366 天。'
+      },
       welcome: {
         title: '👋 欢迎使用 Sub2API',
         description:

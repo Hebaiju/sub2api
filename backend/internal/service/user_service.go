@@ -182,6 +182,27 @@ type UserRepository interface {
 	DisableTotp(ctx context.Context, userID int64) error
 }
 
+// BalanceQueryKeyRepository is an optional extension so existing UserRepository
+// adapters and tests remain source-compatible while the query-key feature is added.
+type BalanceQueryKeyRepository interface {
+	SetBalanceQueryKey(ctx context.Context, userID int64, keyHash string) error
+	GetBalanceQueryKeyHash(ctx context.Context, userID int64) (string, error)
+	GetByBalanceQueryKeyHash(ctx context.Context, keyHash string) (*User, error)
+	GetBalanceQueryUsage(ctx context.Context, userID int64, start, end time.Time) (*BalanceQueryUsage, error)
+}
+
+type BalanceQueryUsage struct {
+	TotalRequests            int64   `json:"total_requests"`
+	TotalInputTokens         int64   `json:"total_input_tokens"`
+	TotalOutputTokens        int64   `json:"total_output_tokens"`
+	TotalCacheCreationTokens int64   `json:"total_cache_creation_tokens"`
+	TotalCacheReadTokens     int64   `json:"total_cache_read_tokens"`
+	TotalTokens              int64   `json:"total_tokens"`
+	TotalCost                float64 `json:"total_cost"`
+	TotalActualCost          float64 `json:"total_actual_cost"`
+	AverageDurationMs        float64 `json:"average_duration_ms"`
+}
+
 // RegistrationEmailDomainRepository 是生产用户仓储为非白名单域名单账户兜底策略提供的可选能力。
 // 它独立于 UserRepository，避免无关测试桩和服务消费者实现注册专用方法。
 type RegistrationEmailDomainRepository interface {
@@ -328,6 +349,38 @@ func (s *UserService) GetProfile(ctx context.Context, userID int64) (*User, erro
 		return nil, fmt.Errorf("get user avatar: %w", err)
 	}
 	return user, nil
+}
+
+func (s *UserService) SetBalanceQueryKey(ctx context.Context, userID int64, keyHash string) error {
+	repo, ok := s.userRepo.(BalanceQueryKeyRepository)
+	if !ok {
+		return fmt.Errorf("balance query key storage is unavailable")
+	}
+	return repo.SetBalanceQueryKey(ctx, userID, keyHash)
+}
+
+func (s *UserService) GetBalanceQueryKeyHash(ctx context.Context, userID int64) (string, error) {
+	repo, ok := s.userRepo.(BalanceQueryKeyRepository)
+	if !ok {
+		return "", fmt.Errorf("balance query key storage is unavailable")
+	}
+	return repo.GetBalanceQueryKeyHash(ctx, userID)
+}
+
+func (s *UserService) GetByBalanceQueryKeyHash(ctx context.Context, keyHash string) (*User, error) {
+	repo, ok := s.userRepo.(BalanceQueryKeyRepository)
+	if !ok {
+		return nil, fmt.Errorf("balance query key storage is unavailable")
+	}
+	return repo.GetByBalanceQueryKeyHash(ctx, keyHash)
+}
+
+func (s *UserService) GetBalanceQueryUsage(ctx context.Context, userID int64, start, end time.Time) (*BalanceQueryUsage, error) {
+	repo, ok := s.userRepo.(BalanceQueryKeyRepository)
+	if !ok {
+		return nil, fmt.Errorf("balance query usage storage is unavailable")
+	}
+	return repo.GetBalanceQueryUsage(ctx, userID, start, end)
 }
 
 func (s *UserService) GetProfileIdentitySummaries(ctx context.Context, userID int64, user *User) (UserIdentitySummarySet, error) {

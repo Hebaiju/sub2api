@@ -28,6 +28,20 @@ export async function getProfile(): Promise<User> {
   return data
 }
 
+export async function getBalanceQueryKeyStatus(): Promise<{ enabled: boolean }> {
+  const { data } = await apiClient.get<{ enabled: boolean }>('/user/balance-query-key')
+  return data
+}
+
+export async function createBalanceQueryKey(): Promise<{ key: string }> {
+  const { data } = await apiClient.post<{ key: string }>('/user/balance-query-key')
+  return data
+}
+
+export async function revokeBalanceQueryKey(): Promise<void> {
+  await apiClient.delete('/user/balance-query-key')
+}
+
 /**
  * Update current user profile
  * @param profile - Profile data to update
