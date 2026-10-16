@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -113,6 +112,8 @@ type UserUpdateFields struct {
 	BalanceNotifyExtraEmails bool
 	// AllowedGroups 为 true 时才同步 user_allowed_groups 关联表。
 	AllowedGroups bool
+	// RestrictPublicGroups 覆盖 restrict_public_groups 列。
+	RestrictPublicGroups bool
 }
 
 // BalanceChange 记录一次余额变更前后的值。
@@ -179,6 +180,27 @@ type UserRepository interface {
 	UpdateTotpSecret(ctx context.Context, userID int64, encryptedSecret *string) error
 	EnableTotp(ctx context.Context, userID int64) error
 	DisableTotp(ctx context.Context, userID int64) error
+}
+
+// BalanceQueryKeyRepository is an optional extension so existing UserRepository
+// adapters and tests remain source-compatible while the query-key feature is added.
+type BalanceQueryKeyRepository interface {
+	SetBalanceQueryKey(ctx context.Context, userID int64, keyHash string) error
+	GetBalanceQueryKeyHash(ctx context.Context, userID int64) (string, error)
+	GetByBalanceQueryKeyHash(ctx context.Context, keyHash string) (*User, error)
+	GetBalanceQueryUsage(ctx context.Context, userID int64, start, end time.Time) (*BalanceQueryUsage, error)
+}
+
+type BalanceQueryUsage struct {
+	TotalRequests            int64   `json:"total_requests"`
+	TotalInputTokens         int64   `json:"total_input_tokens"`
+	TotalOutputTokens        int64   `json:"total_output_tokens"`
+	TotalCacheCreationTokens int64   `json:"total_cache_creation_tokens"`
+	TotalCacheReadTokens     int64   `json:"total_cache_read_tokens"`
+	TotalTokens              int64   `json:"total_tokens"`
+	TotalCost                float64 `json:"total_cost"`
+	TotalActualCost          float64 `json:"total_actual_cost"`
+	AverageDurationMs        float64 `json:"average_duration_ms"`
 }
 
 // RegistrationEmailDomainRepository 是生产用户仓储为非白名单域名单账户兜底策略提供的可选能力。
@@ -327,6 +349,38 @@ func (s *UserService) GetProfile(ctx context.Context, userID int64) (*User, erro
 		return nil, fmt.Errorf("get user avatar: %w", err)
 	}
 	return user, nil
+}
+
+func (s *UserService) SetBalanceQueryKey(ctx context.Context, userID int64, keyHash string) error {
+	repo, ok := s.userRepo.(BalanceQueryKeyRepository)
+	if !ok {
+		return fmt.Errorf("balance query key storage is unavailable")
+	}
+	return repo.SetBalanceQueryKey(ctx, userID, keyHash)
+}
+
+func (s *UserService) GetBalanceQueryKeyHash(ctx context.Context, userID int64) (string, error) {
+	repo, ok := s.userRepo.(BalanceQueryKeyRepository)
+	if !ok {
+		return "", fmt.Errorf("balance query key storage is unavailable")
+	}
+	return repo.GetBalanceQueryKeyHash(ctx, userID)
+}
+
+func (s *UserService) GetByBalanceQueryKeyHash(ctx context.Context, keyHash string) (*User, error) {
+	repo, ok := s.userRepo.(BalanceQueryKeyRepository)
+	if !ok {
+		return nil, fmt.Errorf("balance query key storage is unavailable")
+	}
+	return repo.GetByBalanceQueryKeyHash(ctx, keyHash)
+}
+
+func (s *UserService) GetBalanceQueryUsage(ctx context.Context, userID int64, start, end time.Time) (*BalanceQueryUsage, error) {
+	repo, ok := s.userRepo.(BalanceQueryKeyRepository)
+	if !ok {
+		return nil, fmt.Errorf("balance query usage storage is unavailable")
+	}
+	return repo.GetBalanceQueryUsage(ctx, userID, start, end)
 }
 
 func (s *UserService) GetProfileIdentitySummaries(ctx context.Context, userID int64, user *User) (UserIdentitySummarySet, error) {
@@ -1316,28 +1370,7 @@ func (s *UserService) VerifyAndAddNotifyEmail(ctx context.Context, userID int64,
 
 // verifyNotifyCode validates the verification code against the cached data.
 func verifyNotifyCode(ctx context.Context, cache EmailCache, email, code string) error {
-	data, err := cache.GetNotifyVerifyCode(ctx, email)
-	if err != nil || data == nil {
-		return ErrInvalidVerifyCode
-	}
-	if data.Attempts >= maxVerifyCodeAttempts {
-		return ErrVerifyCodeMaxAttempts
-	}
-	if subtle.ConstantTimeCompare([]byte(data.Code), []byte(code)) != 1 {
-		data.Attempts++
-		remaining := time.Until(data.ExpiresAt)
-		if remaining <= 0 {
-			return ErrInvalidVerifyCode
-		}
-		if err := cache.SetNotifyVerifyCode(ctx, email, data, remaining); err != nil {
-			slog.Error("failed to update notify verify code attempts", "email", email, "error", err)
-		}
-		if data.Attempts >= maxVerifyCodeAttempts {
-			return ErrVerifyCodeMaxAttempts
-		}
-		return ErrInvalidVerifyCode
-	}
-	return nil
+	return verifyCodeWithAttempts(ctx, email, code, cache.GetNotifyVerifyCode, cache.IncrNotifyVerifyCodeAttempts, nil)
 }
 
 // addOrVerifyNotifyEmail adds the email to user's extra notification emails or marks it as verified.

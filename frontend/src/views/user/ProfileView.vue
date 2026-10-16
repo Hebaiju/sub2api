@@ -43,6 +43,29 @@
         :user-email="user.email"
       />
 
+      <section class="card space-y-4 p-6">
+        <div>
+          <h2 class="text-lg font-semibold">{{ t('user.balanceQuery.title') }}</h2>
+          <p class="mt-1 text-sm text-gray-500">{{ t('user.balanceQuery.description') }}</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <span class="text-sm">{{ keyEnabled ? t('user.balanceQuery.enabled') : t('user.balanceQuery.disabled') }}</span>
+          <button class="btn btn-primary" :disabled="keyBusy" @click="createQueryKey">
+            {{ keyEnabled ? t('user.balanceQuery.rotate') : t('user.balanceQuery.create') }}
+          </button>
+          <button v-if="keyEnabled" class="btn btn-secondary" :disabled="keyBusy" @click="revokeQueryKey">
+            {{ t('user.balanceQuery.revoke') }}
+          </button>
+        </div>
+        <div v-if="freshQueryKey" class="space-y-2 rounded-lg bg-gray-50 p-3 dark:bg-gray-800">
+          <p class="break-all font-mono text-sm">{{ freshQueryKey }}</p>
+          <p class="text-xs text-amber-600">{{ t('user.balanceQuery.oneTimeNotice') }}</p>
+          <button class="btn btn-secondary" @click="copyQueryKey">{{ t('common.copy') }}</button>
+        </div>
+        <p class="break-all text-xs text-gray-500">GET {{ queryEndpoint }} (Authorization: Bearer &lt;key&gt;)</p>
+        <p class="text-xs text-gray-500">{{ t('user.balanceQuery.usageParameters') }}</p>
+      </section>
+
       <ProfileTotpCard />
       <ProfilePasskeyCard :enabled="passkeyEnabled" />
     </div>
@@ -59,6 +82,7 @@ import ProfileInfoCard from '@/components/user/profile/ProfileInfoCard.vue'
 import ProfilePasswordForm from '@/components/user/profile/ProfilePasswordForm.vue'
 import ProfileTotpCard from '@/components/user/profile/ProfileTotpCard.vue'
 import ProfilePasskeyCard from '@/components/user/profile/ProfilePasskeyCard.vue'
+import { createBalanceQueryKey, getBalanceQueryKeyStatus, revokeBalanceQueryKey } from '@/api/user'
 import { isWeChatWebOAuthEnabled } from '@/api/auth'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -79,8 +103,32 @@ const wechatOAuthMPEnabled = ref<boolean | undefined>(undefined)
 const oidcOAuthEnabled = ref(false)
 const oidcOAuthProviderName = ref('OIDC')
 const passkeyEnabled = ref(false)
+const keyEnabled = ref(false)
+const keyBusy = ref(false)
+const freshQueryKey = ref('')
+const queryEndpoint = `${window.location.origin}/api/v1/balance`
+
+async function refreshQueryKeyStatus() {
+  try { keyEnabled.value = (await getBalanceQueryKeyStatus()).enabled } catch (error) { console.error('Failed to load balance query key status:', error) }
+}
+
+async function createQueryKey() {
+  keyBusy.value = true
+  try {
+    freshQueryKey.value = (await createBalanceQueryKey()).key
+    keyEnabled.value = true
+  } catch (error) { console.error('Failed to create balance query key:', error) } finally { keyBusy.value = false }
+}
+
+async function revokeQueryKey() {
+  keyBusy.value = true
+  try { await revokeBalanceQueryKey(); keyEnabled.value = false; freshQueryKey.value = '' } catch (error) { console.error('Failed to revoke balance query key:', error) } finally { keyBusy.value = false }
+}
+
+async function copyQueryKey() { await navigator.clipboard.writeText(freshQueryKey.value) }
 
 onMounted(async () => {
+  void refreshQueryKeyStatus()
   const profileRefresh = authStore.refreshUser().catch((error) => {
     console.error('Failed to refresh profile:', error)
   })

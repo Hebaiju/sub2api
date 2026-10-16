@@ -62,6 +62,8 @@ export default {
   purchase: {
     title: '充值/订阅',
     description: '通过内嵌页面完成充值/订阅',
+    rechargeDescription: '通过内嵌页面完成充值',
+    subscriptionDescription: '通过内嵌页面完成订阅',
     openInNewTab: '新窗口打开',
     notEnabledTitle: '该功能未开启',
     notEnabledDesc: '管理员暂未开启充值/订阅入口，请联系管理员。',
@@ -270,6 +272,9 @@ export default {
     },
     // User tour steps
     user: {
+      balanceQuery: {
+        title: '余额查询 API', description: '创建专用查询密钥，通过 JSON 接口读取当前账户余额和充值总额。此密钥与 AI 服务 API Key 相互独立。', enabled: '已启用', disabled: '未启用', create: '创建查询密钥', rotate: '重新生成密钥', revoke: '撤销密钥', oneTimeNotice: '密钥只显示这一次，请立即复制并妥善保存。', usageParameters: '按时间查询用量：同时传入 start_time 和 end_time（RFC3339，例如 2026-10-01T00:00:00Z），查询范围为含开始、不含结束，最长 366 天。'
+      },
       welcome: {
         title: '👋 欢迎使用 Sub2API',
         description:
@@ -313,6 +318,13 @@ export default {
     amountLabel: '充值金额',
     paymentAmount: '支付金额',
     creditedBalance: '到账余额',
+    rechargeBonus: {
+      creditedShort: '到账 {amount}',
+      payShort: '实付 {amount}',
+      amountLabel: '赠送额度',
+      amountLabelWithPercent: '赠送额度 (+{percent}%)',
+      discountLabelWithPercent: '优惠 ({percent}% OFF)',
+    },
     quickAmounts: '快捷金额',
     customAmount: '自定义金额',
     enterAmount: '输入金额',
@@ -379,6 +391,8 @@ export default {
       amount: '金额',
       payAmount: '实付',
       creditedAmount: '到账金额',
+      bonusAmount: '赠送额度',
+      bonusIncluded: '含赠送 {amount}',
       fee: '手续费',
       baseAmount: '充值金额',
       includedInPayAmount: '已含在实付金额中',
@@ -409,12 +423,13 @@ export default {
     tabSubscribe: '订阅',
     noPlans: '暂无可用订阅套餐',
     notAvailable: '充值功能暂未开放',
+    billingUnavailable: '充值与订阅均暂未开放，请联系管理员。',
     confirmSubscription: '确认订阅',
     confirmCancel: '确定要取消此订单吗？',
     amountTooLow: '最低金额为 {min}',
     amountTooHigh: '最高金额为 {max}',
     amountNoMethod: '该金额没有可用的支付方式',
-    rechargeRatePreview: '当前倍率：1 CNY = {usd} USD',
+    rechargeRatePreview: '当前倍率：1 {currency} = {usd} USD',
     refundReason: '退款原因',
     refundReasonPlaceholder: '请描述您的退款原因',
     stripeLoadFailed: '支付组件加载失败，请刷新页面重试',

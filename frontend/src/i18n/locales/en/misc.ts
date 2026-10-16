@@ -63,6 +63,8 @@ export default {
   purchase: {
     title: 'Recharge / Subscription',
     description: 'Recharge balance or purchase subscription via the embedded page',
+    rechargeDescription: 'Recharge balance via the embedded page',
+    subscriptionDescription: 'Purchase subscription via the embedded page',
     openInNewTab: 'Open in new tab',
     notEnabledTitle: 'Feature not enabled',
     notEnabledDesc: 'The administrator has not enabled the recharge/subscription entry. Please contact admin.',
@@ -252,6 +254,9 @@ export default {
     },
     // User tour steps
     user: {
+      balanceQuery: {
+        title: 'Balance Query API', description: 'Create a dedicated key to read your current balance and total recharges as JSON. This key is separate from AI service API keys.', enabled: 'Enabled', disabled: 'Not enabled', create: 'Create query key', rotate: 'Regenerate key', revoke: 'Revoke key', oneTimeNotice: 'The key is shown only once. Copy and store it securely now.', usageParameters: 'For usage by period, provide both start_time and end_time as RFC3339 timestamps (for example, 2026-10-01T00:00:00Z). The start is inclusive, the end is exclusive, and the maximum range is 366 days.'
+      },
       welcome: {
         title: '👋 Welcome to Sub2API',
         description: '<div style="line-height: 1.8;"><p style="margin-bottom: 16px;">Hello! Welcome to the Sub2API AI service platform.</p><p style="margin-bottom: 12px;"><b>🎯 Quick Start:</b></p><ul style="margin-left: 20px; margin-bottom: 16px;"><li>🔑 Create API Key</li><li>📋 Copy key to your application</li><li>🚀 Start using AI services</li></ul><p style="color: #10b981; font-weight: 600;">Just 1 minute, let\'s get started →</p></div>',
@@ -289,6 +294,13 @@ export default {
     amountLabel: 'Amount',
     paymentAmount: 'Payment Amount',
     creditedBalance: 'Credited Balance',
+    rechargeBonus: {
+      creditedShort: 'Get {amount}',
+      payShort: 'Pay {amount}',
+      amountLabel: 'Bonus',
+      amountLabelWithPercent: 'Bonus (+{percent}%)',
+      discountLabelWithPercent: 'Discount ({percent}% OFF)',
+    },
     quickAmounts: 'Quick Amounts',
     customAmount: 'Custom Amount',
     enterAmount: 'Enter amount',
@@ -355,6 +367,8 @@ export default {
       amount: 'Amount',
       payAmount: 'Paid',
       creditedAmount: 'Credited Amount',
+      bonusAmount: 'Bonus',
+      bonusIncluded: 'incl. bonus {amount}',
       fee: 'Fee',
       baseAmount: 'Base Amount',
       includedInPayAmount: 'included in paid amount',
@@ -385,12 +399,13 @@ export default {
     tabSubscribe: 'Subscribe',
     noPlans: 'No subscription plans available',
     notAvailable: 'Top-up is currently unavailable',
+    billingUnavailable: 'Neither top-up nor subscriptions are currently available. Please contact the administrator.',
     confirmSubscription: 'Confirm Subscription',
     confirmCancel: 'Are you sure you want to cancel this order?',
     amountTooLow: 'Minimum amount is {min}',
     amountTooHigh: 'Maximum amount is {max}',
     amountNoMethod: 'No payment method available for this amount',
-    rechargeRatePreview: 'Current rate: 1 CNY = {usd} USD',
+    rechargeRatePreview: 'Current rate: 1 {currency} = {usd} USD',
     refundReason: 'Refund Reason',
     refundReasonPlaceholder: 'Please describe your refund reason',
     stripeLoadFailed: 'Failed to load payment component. Please refresh and try again.',

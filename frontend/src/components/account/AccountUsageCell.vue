@@ -77,8 +77,19 @@
           color="amber"
         />
 
-        <!-- Passive sampling label + active query button -->
-        <div class="flex items-center gap-1.5 mt-0.5">
+      </div>
+
+      <!-- No data yet -->
+      <div v-else class="space-y-1">
+        <div class="text-xs text-gray-400">-</div>
+      </div>
+      <!--
+        One stable instance for every usage state, so a reset-credit query started
+        while usage is still loading survives the usage response. The local query
+        button shares its row once usage data exists.
+      -->
+      <ClaudeResetCreditsCell :account="account" class="mt-1" @redeemed="loadActiveUsage">
+        <template v-if="usageInfo" #pre-actions>
           <span
             v-if="usageInfo.source === 'passive'"
             class="text-[9px] text-gray-400 dark:text-gray-500 italic"
@@ -87,7 +98,7 @@
           </span>
           <button
             type="button"
-            class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/30 transition-colors"
+            class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/30 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
             :disabled="activeQueryLoading"
             @click="loadActiveUsage"
           >
@@ -107,13 +118,8 @@
             </svg>
             {{ t('admin.accounts.usageWindow.activeQuery') }}
           </button>
-        </div>
-      </div>
-
-      <!-- No data yet -->
-      <div v-else class="space-y-1">
-        <div class="text-xs text-gray-400">-</div>
-      </div>
+        </template>
+      </ClaudeResetCreditsCell>
     </template>
 
     <!-- OpenAI OAuth accounts: single source from /usage API -->
@@ -134,6 +140,7 @@
           :utilization="usageInfo.seven_day.utilization"
           :resets-at="usageInfo.seven_day.resets_at"
           :window-stats="usageInfo.seven_day.window_stats"
+          :estimated-total-cost="openAISevenDayEstimatedTotalCost"
           :show-now-when-idle="true"
           color="emerald"
         />
@@ -365,6 +372,7 @@
             label="24h"
             :title="t('admin.accounts.usageWindow.grokFreeQuota24hHint', { limit: formatCompactNumber(grokFreeTokenBar.limit) })"
             :utilization="grokFreeTokenBar.utilization"
+            :window-stats="grokFreeQuotaUsage"
             :show-now-when-idle="true"
             color="emerald"
           />
@@ -378,6 +386,7 @@
             label="7d"
             :utilization="grokWeeklyBillingBar.utilization"
             :resets-at="grokWeeklyBillingBar.resetsAt"
+            :window-stats="grokWeeklyBillingBar.windowStats"
             :show-now-when-idle="true"
             color="indigo"
           />
@@ -386,6 +395,7 @@
             label="30d"
             :utilization="grokMonthlyBillingBar.utilization"
             :resets-at="grokMonthlyBillingBar.resetsAt"
+            :window-stats="grokMonthlyBillingBar.windowStats"
             :show-now-when-idle="true"
             color="indigo"
           />
@@ -394,12 +404,16 @@
             class="flex flex-wrap items-center gap-1 text-[10px] text-gray-500 dark:text-gray-400"
           >
             <span
+              v-if="grokPrepaidMoneyLine.showPrepaid"
               class="rounded bg-emerald-50 px-1 py-0.5 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
               :title="t('admin.accounts.usageWindow.grokPrepaid')"
             >
               {{ t('admin.accounts.usageWindow.grokPrepaid') }} ${{ grokPrepaidMoneyLine.prepaid }}
             </span>
-            <span :title="t('admin.accounts.usageWindow.grokMonthlyLimit')">
+            <span
+              v-if="grokPrepaidMoneyLine.showUsedLimit"
+              :title="t('admin.accounts.usageWindow.grokMonthlyLimit')"
+            >
               {{ t('admin.accounts.usageWindow.grokUsed') }}
               {{ grokPrepaidMoneyLine.used }}/{{ grokPrepaidMoneyLine.limit }}
             </span>
@@ -422,6 +436,45 @@
       </div>
     </template>
 
+    <!-- Multi-protocol API-key providers (CN vendors, OpenCode, Command Code):
+         coding-plan / subscription quota windows or balance -->
+    <template v-else-if="isMultiProtocolApiKeyPlatform(account.platform)">
+      <!-- 挂在 CN 平台下的 Ollama Cloud 账号（资格由后端下发 eligible）：用量由
+           Ollama 用量窗口负责。这类账号不是国产厂商订阅，CN 的额度/余额探测端点由
+           base_url 衍生，对 ollama.com 会被后端出站 URL 白名单拒绝，渲染出来只会
+           给用户一行探测报错，因此不再渲染 CN 子单元格与占位符。 -->
+      <OllamaCloudUsageCell
+        v-if="account.ollama_cloud_usage?.eligible"
+        :account="account"
+        @updated="handleOllamaCloudUsageUpdated"
+      />
+      <!-- 挂在 CN 平台下的 OpenCode Go 账号（资格由后端下发 eligible）：用量展示与
+           刷新由本分支的 OpenCode 用量窗口独占。对 platform=opencode_go：上游 CN
+           配额链路原生支持该平台（cnQuotaCellVisible 对它返回 true），但其探测
+           端点（base_url + "/usage"，默认 base 即官方 Go 基址）与本 cell 刷新的
+           是同一端点、同一份数据，抑制 CN 子单元格是为了避免同源双份探测与重复
+           展示。对挂载在 kimi/zhipu/deepseek/minimax 下的账号：CN 的额度/余额
+           探测端点由 base_url 衍生，对 opencode.ai 会被后端出站 URL 白名单拒绝，
+           渲染出来只会给用户一行探测报错。两种情况都不再渲染 CN 子单元格与
+           占位符（调度停调仍由上游 CN 触发各自驱动）。 -->
+      <OpenCodeGoUsageCell
+        v-else-if="account.opencode_go_usage?.eligible"
+        :account="account"
+        @updated="handleOpenCodeGoUsageUpdated"
+      />
+      <div v-else class="space-y-1">
+        <!-- 子单元格各自按 模式×平台 判定可见；两者都不可见时（智谱 payg 无公开
+             余额端点、coding 探测也不适用）才回落到占位符。 -->
+        <div
+          v-if="!cnQuotaCellVisible && !cnBalanceCellVisible"
+          class="text-xs text-gray-400"
+          :title="t('admin.accounts.cnProviders.noBalanceEndpoint')"
+        >-</div>
+        <CNProviderQuotaCell :account="account" />
+        <CNProviderBalanceCell :account="account" />
+      </div>
+    </template>
+
     <!-- Gemini platform: show quota + local usage window -->
     <template v-else-if="account.platform === 'gemini'">
       <!-- Auth Type + Tier Badge (first line) -->
@@ -436,6 +489,7 @@
         </span>
         <!-- Help icon -->
         <span
+          v-if="showGeminiQuotaPolicy"
           class="group relative cursor-help"
         >
           <svg
@@ -526,7 +580,7 @@
           </p>
         </div>
         <!-- AI Studio Client OAuth: show unlimited flow (no usage tracking) -->
-        <div v-else class="text-xs text-gray-400">
+        <div v-else-if="!showGeminiTodayStats" class="text-xs text-gray-400">
           {{ t('admin.accounts.gemini.rateLimit.unlimited') }}
         </div>
       </div>
@@ -541,12 +595,20 @@
   <!-- Non-OAuth/Setup-Token accounts -->
   <div ref="rootRef" v-else>
     <!-- Gemini API Key accounts: show quota info -->
-    <AccountQuotaInfo v-if="account.platform === 'gemini'" :account="account" />
+    <AccountQuotaInfo v-if="account.platform === 'gemini' && !isGeminiThirdPartyApiKey" :account="account" />
     <!-- Key/Bedrock accounts: show today stats + optional quota bars -->
     <div v-else class="space-y-1">
       <OllamaCloudUsageCell
         v-if="account.ollama_cloud_usage?.eligible"
         :account="account"
+        @updated="handleOllamaCloudUsageUpdated"
+      />
+      <!-- 与上方 CN 分支结构对齐：Ollama 与 OpenCode 用量身份互斥（基址 host 不同），
+           v-else-if 提供结构性互斥保证，不改变实际渲染结果。 -->
+      <OpenCodeGoUsageCell
+        v-else-if="account.opencode_go_usage?.eligible"
+        :account="account"
+        @updated="handleOpenCodeGoUsageUpdated"
       />
       <!-- Today stats row (requests, tokens, cost, user_cost) -->
       <div
@@ -606,7 +668,7 @@
 
       <!-- No data at all -->
       <div
-        v-if="!todayStats && !todayStatsLoading && !hasApiKeyQuota && !account.ollama_cloud_usage?.eligible"
+        v-if="!todayStats && !todayStatsLoading && !hasApiKeyQuota && !account.ollama_cloud_usage?.eligible && !account.opencode_go_usage?.eligible"
         class="text-xs text-gray-400"
       >-</div>
     </div>
@@ -621,17 +683,25 @@ import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import { formatCompactNumber } from '@/utils/format'
+import { isOfficialGeminiBaseUrl } from '@/utils/geminiExplicitCache'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
+import ClaudeResetCreditsCell from './ClaudeResetCreditsCell.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
 import GrokQuotaProbeCell from './GrokQuotaProbeCell.vue'
+import CNProviderQuotaCell from './CNProviderQuotaCell.vue'
+import CNProviderBalanceCell from './CNProviderBalanceCell.vue'
 import OllamaCloudUsageCell from './OllamaCloudUsageCell.vue'
+import {
+  cnQuotaCellVisible as cnQuotaCellVisibleFn,
+  cnBalanceCellVisible as cnBalanceCellVisibleFn,
+  isMultiProtocolApiKeyPlatform
+} from './credentialsBuilder'
+import OpenCodeGoUsageCell from './OpenCodeGoUsageCell.vue'
 
 // Module-level cache shared across all AccountUsageCell instances
 const _usageCache = new Map<number, { data: AccountUsageInfo; ts: number }>()
 const USAGE_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
-// How long a quota-reset response may suppress the row-patch usage refetch.
-const SUPPRESS_USAGE_REFRESH_WINDOW_MS = 5 * 1000
 
 const props = withDefaults(
   defineProps<{
@@ -673,7 +743,6 @@ const usageInfo = ref<AccountUsageInfo | null>(null)
 watch(usageInfo, (usage) => {
   if (usage) emit('usage-loaded', usage)
 })
-const suppressOpenAIUsageRefreshUntil = ref(0)
 const rootRef = ref<HTMLElement | null>(null)
 const isDesktopViewport = ref(
   typeof window === 'undefined' ? true : window.matchMedia(desktopViewportQuery).matches
@@ -686,10 +755,27 @@ let desktopViewportMediaQuery: MediaQueryList | null = null
 let desktopViewportListener: ((event: MediaQueryListEvent) => void) | null = null
 let visibilityObserver: IntersectionObserver | null = null
 
+// Gemini 第三方上游 API Key：没有 AI Studio 等级与本地模拟配额
+const isGeminiThirdPartyApiKey = computed(() => {
+  if (props.account.platform !== 'gemini' || props.account.type !== 'apikey') return false
+  const creds = props.account.credentials as GeminiCredentials | undefined
+  return !isOfficialGeminiBaseUrl(creds?.base_url)
+})
+
+const isGeminiVertex = computed(() => {
+  return props.account.platform === 'gemini' && props.account.type === 'service_account'
+})
+
 // Show usage windows for OAuth and Setup Token accounts
 const showUsageWindows = computed(() => {
   // Gemini: we can always compute local usage windows from DB logs (simulated quotas).
-  if (props.account.platform === 'gemini') return true
+  // 第三方上游 API Key 没有模拟配额，按普通 Key 账号展示今日统计与额度进度条。
+  if (props.account.platform === 'gemini') return !isGeminiThirdPartyApiKey.value
+  // 多协议 API Key 供应商：apikey 账号也有滚动用量窗口（coding plan / 订阅）或余额，
+  // 由 CNProviderQuotaCell / CNProviderBalanceCell 自行探测与展示。
+  if (isMultiProtocolApiKeyPlatform(props.account.platform)) {
+    return true
+  }
   return props.account.type === 'oauth' || props.account.type === 'setup-token'
 })
 
@@ -698,7 +784,7 @@ const shouldFetchUsage = computed(() => {
     return props.account.type === 'oauth' || props.account.type === 'setup-token'
   }
   if (props.account.platform === 'gemini') {
-    return true
+    return !isGeminiThirdPartyApiKey.value && !isGeminiVertex.value
   }
   if (props.account.platform === 'antigravity') {
     return props.account.type === 'oauth'
@@ -712,10 +798,16 @@ const shouldFetchUsage = computed(() => {
   return false
 })
 
+// CN 供应商子单元格可见性（与 CNProviderQuotaCell / CNProviderBalanceCell 共用
+// credentialsBuilder 的单一实现）：都不可见时显示 `-` 占位符。
+const cnQuotaCellVisible = computed(() => cnQuotaCellVisibleFn(props.account))
+const cnBalanceCellVisible = computed(() => cnBalanceCellVisibleFn(props.account))
+
 const isBatchManaged = computed(() => typeof props.requestBatchedUsage === 'function')
 
+// Vertex 没有本地模拟配额，用量窗口展示今日统计
 const showGeminiTodayStats = computed(() => {
-  return props.account.platform === 'gemini' && props.account.type === 'service_account'
+  return isGeminiVertex.value
 })
 
 const geminiUsageAvailable = computed(() => {
@@ -732,6 +824,25 @@ const geminiUsageAvailable = computed(() => {
 const hasOpenAIUsageFallback = computed(() => {
   if (props.account.platform !== 'openai' || props.account.type !== 'oauth') return false
   return !!usageInfo.value?.five_hour || !!usageInfo.value?.seven_day
+})
+
+const openAISevenDayEstimatedTotalCost = computed(() => {
+  const sevenDay = usageInfo.value?.seven_day
+  const utilization = sevenDay?.utilization
+  const currentCost = sevenDay?.window_stats?.cost
+  if (
+    typeof utilization !== 'number' ||
+    typeof currentCost !== 'number' ||
+    !Number.isFinite(utilization) ||
+    !Number.isFinite(currentCost) ||
+    utilization <= 0 ||
+    currentCost <= 0
+  ) {
+    return null
+  }
+
+  const estimate = (currentCost * 100) / utilization
+  return Number.isFinite(estimate) && estimate > 0 ? estimate : null
 })
 
 const openAIUsageRefreshKey = computed(() => buildOpenAIUsageRefreshKey(props.account))
@@ -809,6 +920,7 @@ const antigravity3ImageUsageFromAPI = computed(() =>
 // Claude from API (all Claude model variants)
 const antigravityClaudeUsageFromAPI = computed(() =>
   getAntigravityUsageFromAPI([
+    'claude-fable-5-1',
     'claude-fable-5',
     'claude-sonnet-4-5', 'claude-opus-4-5-thinking',
     'claude-sonnet-4-6', 'claude-opus-4-6', 'claude-opus-4-6-thinking',
@@ -859,6 +971,10 @@ const geminiOAuthType = computed(() => {
   return (creds?.oauth_type || '').trim() || null
 })
 
+const showGeminiQuotaPolicy = computed(() => {
+  return !isGeminiVertex.value
+})
+
 // Gemini 是否为 Code Assist OAuth
 const isGeminiCodeAssist = computed(() => {
   if (props.account.platform !== 'gemini') return false
@@ -866,9 +982,10 @@ const isGeminiCodeAssist = computed(() => {
   return creds?.oauth_type === 'code_assist' || (!creds?.oauth_type && !!creds?.project_id)
 })
 
-const geminiChannelShort = computed((): 'ai studio' | 'gcp' | 'google one' | 'client' | null => {
+const geminiChannelShort = computed((): 'ai studio' | 'vertex' | 'gcp' | 'google one' | 'client' | null => {
   if (props.account.platform !== 'gemini') return null
 
+  if (isGeminiVertex.value) return 'vertex'
   // API Key accounts are AI Studio.
   if (props.account.type === 'apikey') return 'ai studio'
 
@@ -882,6 +999,7 @@ const geminiChannelShort = computed((): 'ai studio' | 'gcp' | 'google one' | 'cl
 
 const geminiUserLevel = computed((): string | null => {
   if (props.account.platform !== 'gemini') return null
+  if (isGeminiVertex.value) return null
 
   const tier = (geminiTier.value || '').toString().trim()
   const tierLower = tier.toLowerCase()
@@ -939,7 +1057,7 @@ const geminiTierClass = computed(() => {
   const channel = geminiChannelShort.value
   const level = geminiUserLevel.value
 
-  if (channel === 'client' || channel === 'ai studio') {
+  if (channel === 'client' || channel === 'ai studio' || channel === 'vertex') {
     return 'bg-blue-100 text-blue-600 dark:bg-blue-900/40 dark:text-blue-300'
   }
 
@@ -1071,9 +1189,16 @@ const geminiUsageBars = computed(() => {
 interface GrokQuotaBarInfo {
   utilization: number
   resetsAt: string | null
+  windowStats?: WindowStats | null
 }
 
 const grokBilling = computed(() => usageInfo.value?.grok_billing || null)
+const grokLocalUsage7d = computed(() => (
+  usageInfo.value?.grok_local_usage_7d || usageInfo.value?.seven_day?.window_stats || null
+))
+const grokLocalUsageMonthly = computed(() => (
+  usageInfo.value?.grok_local_usage_monthly || usageInfo.value?.thirty_day?.window_stats || null
+))
 const grokWeeklyBillingBar = computed((): GrokQuotaBarInfo | null => {
   const billing = grokBilling.value
   if (billing?.period_type?.toLowerCase() !== 'weekly' || billing.usage_percent == null) {
@@ -1081,7 +1206,8 @@ const grokWeeklyBillingBar = computed((): GrokQuotaBarInfo | null => {
   }
   return {
     utilization: Math.min(100, Math.max(0, billing.usage_percent)),
-    resetsAt: billing.period_end || null
+    resetsAt: billing.period_end || null,
+    windowStats: grokLocalUsage7d.value
   }
 })
 // Monthly used/limit % from billing probe (used_percent or derived from cents).
@@ -1105,7 +1231,8 @@ const grokMonthlyBillingBar = computed((): GrokQuotaBarInfo | null => {
   }
   return {
     utilization: Math.min(100, Math.max(0, utilization)),
-    resetsAt: billing.billing_period_end || billing.period_end || null
+    resetsAt: billing.billing_period_end || billing.period_end || null,
+    windowStats: grokLocalUsageMonthly.value
   }
 })
 const formatGrokMoney = (value?: number | null) => {
@@ -1115,30 +1242,33 @@ const formatGrokMoney = (value?: number | null) => {
   if (value >= 10) return value.toFixed(1)
   return value.toFixed(2)
 }
-// Prepaid money line for paid Grok: show when prepaid_balance is present.
-// Monthly used/limit numbers are optional context; primary progress is the 30d bar.
+// Prepaid chip only when there is a positive prepaid balance.
+// Used/limit only when monthly limit is a positive number (0 means unlimited / unset).
 const grokPrepaidMoneyLine = computed(() => {
   const billing = grokBilling.value
   if (!billing) return null
   const prepaid = billing.prepaid_balance
-  // "只针对预付": only render when prepaid field exists (including $0.00).
-  if (prepaid == null || !Number.isFinite(prepaid)) return null
+  const showPrepaid = prepaid != null && Number.isFinite(prepaid) && prepaid > 0
+  const limitRaw =
+    billing.monthly_limit != null
+      ? billing.monthly_limit
+      : billing.monthly_limit_cents != null
+        ? billing.monthly_limit_cents / 100
+        : null
+  const showUsedLimit = limitRaw != null && Number.isFinite(limitRaw) && limitRaw > 0
+  if (!showPrepaid && !showUsedLimit) return null
   const used =
     billing.monthly_used != null
       ? billing.monthly_used
       : billing.used_cents != null
         ? billing.used_cents / 100
         : 0
-  const limit =
-    billing.monthly_limit != null
-      ? billing.monthly_limit
-      : billing.monthly_limit_cents != null
-        ? billing.monthly_limit_cents / 100
-        : 0
   return {
-    prepaid: formatGrokMoney(prepaid),
-    used: formatGrokMoney(used),
-    limit: formatGrokMoney(limit)
+    showPrepaid,
+    showUsedLimit,
+    prepaid: showPrepaid ? formatGrokMoney(prepaid) : null,
+    used: showUsedLimit ? formatGrokMoney(used) : null,
+    limit: showUsedLimit ? formatGrokMoney(limitRaw) : null
   }
 })
 const grokPlanLabelIsFree = (value: string) => value.includes('free') || value.includes('basic')
@@ -1148,19 +1278,19 @@ const grokPlanLabelIsPaid = (value: string) => {
 const grokIsFree = computed(() => {
   if (props.account.platform !== 'grok' || props.account.type !== 'oauth') return false
   const billing = grokBilling.value
+  const plan = (billing?.plan || '').trim().toLowerCase()
+  const tier = (usageInfo.value?.subscription_tier || '').trim().toLowerCase()
+  const entitlement = (usageInfo.value?.grok_entitlement_status || '').toLowerCase()
+  if (grokPlanLabelIsFree(tier)) return true
+  if (grokPlanLabelIsPaid(tier)) return false
   if (
     billing?.usage_percent != null ||
     billing?.used_percent != null ||
     (billing?.monthly_limit_cents != null && billing.monthly_limit_cents > 0)
   ) return false
-
-  const plan = (billing?.plan || '').trim().toLowerCase()
-  const tier = (usageInfo.value?.subscription_tier || '').trim().toLowerCase()
-  const entitlement = (usageInfo.value?.grok_entitlement_status || '').toLowerCase()
-  if (grokPlanLabelIsPaid(plan) || grokPlanLabelIsPaid(tier)) return false
+  if (grokPlanLabelIsPaid(plan)) return false
   if (
     grokPlanLabelIsFree(plan) ||
-    grokPlanLabelIsFree(tier) ||
     grokPlanLabelIsFree(entitlement)
   ) return true
   return billing != null
@@ -1469,12 +1599,15 @@ const quotaTotalBar = computed((): QuotaBarInfo | null => {
 })
 
 const handleQuotaResetAccountUpdated = (account: Account) => {
-  // The reset response already carries authoritative quota and account data.
-  // Avoid turning the parent patch into a second automatic /usage request.
-  // The suppression is time-boxed so an unhandled emit (parent that ignores
-  // account-updated) cannot latch it and swallow a later, unrelated refresh.
-  suppressOpenAIUsageRefreshUntil.value = Date.now() + SUPPRESS_USAGE_REFRESH_WINDOW_MS
   emit('account-updated', account)
+}
+
+const handleOllamaCloudUsageUpdated = (state: NonNullable<Account['ollama_cloud_usage']>) => {
+  emit('account-updated', { ...props.account, ollama_cloud_usage: state })
+}
+
+const handleOpenCodeGoUsageUpdated = (state: NonNullable<Account['opencode_go_usage']>) => {
+  emit('account-updated', { ...props.account, opencode_go_usage: state })
 }
 
 // ===== Key account today stats formatters =====
@@ -1559,10 +1692,6 @@ watch(
 watch(openAIUsageRefreshKey, (nextKey, prevKey) => {
   if (!prevKey || nextKey === prevKey) return
   if (props.account.platform !== 'openai' || props.account.type !== 'oauth') return
-  if (Date.now() < suppressOpenAIUsageRefreshUntil.value) {
-    suppressOpenAIUsageRefreshUntil.value = 0
-    return
-  }
 
   if (isBatchManaged.value) {
     requestParentBatchUsage({ force: true })

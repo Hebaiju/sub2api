@@ -285,6 +285,12 @@ func ExtractUpstreamErrorMessage(body []byte) string {
 	return extractUpstreamErrorMessage(body)
 }
 
+// SanitizeUpstreamErrorMessage redacts sensitive query parameter values before
+// an upstream error message is recorded or returned to a client.
+func SanitizeUpstreamErrorMessage(message string) string {
+	return sanitizeUpstreamErrorMessage(message)
+}
+
 func extractUpstreamErrorMessage(body []byte) string {
 	// Claude 风格：{"type":"error","error":{"type":"...","message":"..."}}
 	if m := gjson.GetBytes(body, "error.message").String(); strings.TrimSpace(m) != "" {
@@ -356,8 +362,9 @@ func (s *GatewayService) readUpstreamErrorBody(resp *http.Response) ([]byte, err
 }
 
 func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, requestedModel ...string) (*ForwardResult, error) {
-	// Upstream returned a non-success HTTP status; count Ollama Cloud activity.
+	// Upstream returned a non-success HTTP status; count Ollama Cloud / OpenCode Go activity.
 	scheduleOllamaCloudUsageActivity(s.deferredService, account)
+	scheduleOpenCodeGoUsageActivity(s.deferredService, account)
 	body, readErr := s.readUpstreamErrorBody(resp)
 	if readErr != nil {
 		// 读取失败时 body 可能被截断，错误分类会基于不完整数据；记录日志以便排查，
@@ -398,6 +405,8 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 	}
 	setOpsUpstreamError(c, resp.StatusCode, upstreamMsg, upstreamDetail)
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+		ProxyID:            opsUpstreamProxyID(account),
+		ProxyName:          opsUpstreamProxyName(account),
 		Platform:           account.Platform,
 		AccountID:          account.ID,
 		UpstreamStatusCode: resp.StatusCode,
@@ -518,13 +527,19 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 	return nil, fmt.Errorf("upstream error: %d message=%s", resp.StatusCode, upstreamMsg)
 }
 
-func (s *GatewayService) handleRetryExhaustedSideEffects(ctx context.Context, resp *http.Response, account *Account) {
+// handleRetryExhaustedSideEffects 在重试耗尽后标记账号状态；requestedModel 是实际发往上游的模型，
+// 临时不可调度规则据此按模型隔离。
+func (s *GatewayService) handleRetryExhaustedSideEffects(ctx context.Context, resp *http.Response, account *Account, requestedModel ...string) {
 	body, _ := s.readUpstreamErrorBody(resp)
 	statusCode := resp.StatusCode
 
 	// OAuth/Setup Token 账号的 403：标记账号异常
 	if account.IsOAuth() && statusCode == 403 {
-		s.rateLimitService.HandleUpstreamError(ctx, account, statusCode, resp.Header, body)
+		if len(requestedModel) > 0 {
+			s.rateLimitService.HandleUpstreamError(ctx, account, statusCode, resp.Header, body, requestedModel[0])
+		} else {
+			s.rateLimitService.HandleUpstreamError(ctx, account, statusCode, resp.Header, body)
+		}
 		logger.LegacyPrintf("service.gateway", "Account %d: marked as error after %d retries for status %d", account.ID, maxRetryAttempts, statusCode)
 	} else {
 		// API Key 未配置错误码：不标记账号状态
@@ -544,14 +559,14 @@ func (s *GatewayService) handleFailoverSideEffects(ctx context.Context, resp *ht
 // handleRetryExhaustedError 处理重试耗尽后的错误
 // OAuth 403：标记账号异常
 // API Key 未配置错误码：仅返回错误，不标记账号
-func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *http.Response, c *gin.Context, account *Account) (*ForwardResult, error) {
+func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, requestedModel ...string) (*ForwardResult, error) {
 	MarkResponseCommitted(c)
 	// Capture upstream error body before side-effects consume the stream.
 	respBody, _ := s.readUpstreamErrorBody(resp)
 	_ = resp.Body.Close()
 	resp.Body = io.NopCloser(bytes.NewReader(respBody))
 
-	s.handleRetryExhaustedSideEffects(ctx, resp, account)
+	s.handleRetryExhaustedSideEffects(ctx, resp, account, requestedModel...)
 
 	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 	upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
@@ -578,6 +593,8 @@ func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *ht
 	}
 	setOpsUpstreamError(c, resp.StatusCode, upstreamMsg, upstreamDetail)
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+		ProxyID:            opsUpstreamProxyID(account),
+		ProxyName:          opsUpstreamProxyName(account),
 		Platform:           account.Platform,
 		AccountID:          account.ID,
 		UpstreamStatusCode: resp.StatusCode,
@@ -675,11 +692,13 @@ func partialStreamUsageResult(c *gin.Context, resp *http.Response, streamResult 
 	}
 	return &ForwardResult{
 		RequestID:                     resp.Header.Get("x-request-id"),
+		UpstreamHeaders:               resp.Header,
 		Usage:                         *streamResult.usage,
 		Model:                         model,
 		UpstreamModel:                 upstreamModel,
 		UpstreamResponseModel:         observedUpstreamResponseModel(c),
 		UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
+		UpstreamResponseServiceTier:   observedUpstreamResponseServiceTier(c),
 		Stream:                        true,
 		Duration:                      time.Since(startTime),
 		FirstTokenMs:                  streamResult.firstTokenMs,
@@ -1236,11 +1255,11 @@ func (s *GatewayService) extractSSEUsagePatch(event map[string]any) *sseUsagePat
 			patch.hasCacheReadInput = true
 		}
 		if cc, ok := usageObj["cache_creation"].(map[string]any); ok {
-			if v, exists := parseSSEUsageInt(cc["ephemeral_5m_input_tokens"]); exists && v > 0 {
+			if v, exists := parseSSEUsageInt(cc["ephemeral_5m_input_tokens"]); exists {
 				patch.cacheCreation5mTokens = v
 				patch.hasCacheCreation5m = true
 			}
-			if v, exists := parseSSEUsageInt(cc["ephemeral_1h_input_tokens"]); exists && v > 0 {
+			if v, exists := parseSSEUsageInt(cc["ephemeral_1h_input_tokens"]); exists {
 				patch.cacheCreation1hTokens = v
 				patch.hasCacheCreation1h = true
 			}
@@ -1395,7 +1414,7 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-			return nil, s.invalidNonStreamingJSONFailoverError(ctx, resp, account, body, err, mappedModel)
+			return nil, invalidNonStreamingJSONFailoverError(ctx, s.rateLimitService, resp, account, body, err, mappedModel)
 		}
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
