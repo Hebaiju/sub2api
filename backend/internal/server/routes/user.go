@@ -17,6 +17,7 @@ func RegisterUserRoutes(
 	settingService *service.SettingService,
 	panelRateLimiter *middleware.PanelRateLimiter,
 ) {
+	v1.GET("/balance", h.User.QueryBalanceByKey)
 	authenticated := v1.Group("")
 	authenticated.Use(gin.HandlerFunc(jwtAuth))
 	authenticated.Use(middleware.BackendModeUserGuard(settingService))
@@ -29,6 +30,9 @@ func RegisterUserRoutes(
 		user := authenticated.Group("/user")
 		{
 			user.GET("/profile", h.User.GetProfile)
+			user.GET("/balance-query-key", h.User.GetBalanceQueryKeyStatus)
+			user.POST("/balance-query-key", h.User.RotateBalanceQueryKey)
+			user.DELETE("/balance-query-key", h.User.RevokeBalanceQueryKey)
 			user.PUT("/password", h.User.ChangePassword)
 			user.PUT("", h.User.UpdateProfile)
 			user.GET("/aff", h.User.GetAffiliate)

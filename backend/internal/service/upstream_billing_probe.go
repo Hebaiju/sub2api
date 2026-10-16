@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
@@ -126,6 +127,35 @@ type UpstreamBillingProbeResult struct {
 	AccountID int64                         `json:"account_id"`
 	Snapshot  *UpstreamBillingProbeSnapshot `json:"snapshot,omitempty"`
 	Error     string                        `json:"error,omitempty"`
+}
+
+// UpstreamBillingRateSnapshotItem is the compact representation used by the
+// account table's background refresh. It intentionally excludes credentials,
+// runtime counters, and usage data from the response.
+type UpstreamBillingRateSnapshotItem struct {
+	AccountID int64                         `json:"account_id"`
+	Snapshot  *UpstreamBillingProbeSnapshot `json:"snapshot"`
+}
+
+// BuildUpstreamBillingRateSnapshotItems projects account rows into the
+// read-only payload used by the rate refresh endpoint. Decode snapshots here
+// so malformed or legacy extra data is handled consistently with probe logic.
+func BuildUpstreamBillingRateSnapshotItems(accounts []Account) []UpstreamBillingRateSnapshotItem {
+	items := make([]UpstreamBillingRateSnapshotItem, 0, len(accounts))
+	for _, account := range accounts {
+		var snapshot *UpstreamBillingProbeSnapshot
+		// The billing endpoint is supported by every API-key platform; limiting
+		// this projection to OpenAI would make the background refresh erase the
+		// other platforms' persisted snapshots from the table.
+		if account.Type == AccountTypeAPIKey {
+			snapshot = decodeUpstreamBillingProbeSnapshot(account.Extra)
+		}
+		items = append(items, UpstreamBillingRateSnapshotItem{
+			AccountID: account.ID,
+			Snapshot:  snapshot,
+		})
+	}
+	return items
 }
 
 type upstreamBillingProbeResponse struct {
@@ -597,6 +627,9 @@ func (s *UpstreamBillingProbeService) probeLoadedAccount(ctx context.Context, ac
 		return s.persistProbeFailure(ctx, account, intervalMinutes, now, 0, "missing_api_key", 0)
 	}
 	baseURL := account.GetCredential("base_url")
+	if account.RoutesProtocolByInbound() && account.IsAdaptiveAPIProtocol() {
+		baseURL = account.GetCNProtocolBaseURL(APIProtocolChatCompletions)
+	}
 	if account.Platform == PlatformOpenAI {
 		if baseURL == "" {
 			// 保持官方语义：OpenAI 账号无自定义 base 时探官方域（404 → unsupported）。
@@ -965,7 +998,9 @@ func decodeUpstreamBillingProbeSnapshot(extra map[string]any) *UpstreamBillingPr
 
 // IsUpstreamBillingProbeIdentity reports whether an account identity may opt
 // in to the upstream billing probe. `/v1/sub2api/billing` is a key-scoped
-// sub2api convention shared by the five supported API-key platforms.
+// sub2api convention shared by the supported API-key platforms (including the
+// CN providers, whose official-domain accounts are short-circuited to
+// "unsupported" by upstreamBillingProbeTargetIsOfficialAPI).
 // Non-sub2api upstreams return 404 and the snapshot records "unsupported".
 // Only AccountTypeAPIKey is in scope. OAuth/Bedrock hold no static API key to
 // present at all; AccountTypeUpstream (antigravity relay accounts) does carry
@@ -974,15 +1009,7 @@ func decodeUpstreamBillingProbeSnapshot(extra map[string]any) *UpstreamBillingPr
 // type=apikey by the admin form, so only pre-existing type=upstream rows
 // cannot turn the probe on.
 func IsUpstreamBillingProbeIdentity(platform, accountType string) bool {
-	if accountType != AccountTypeAPIKey {
-		return false
-	}
-	switch platform {
-	case PlatformOpenAI, PlatformAnthropic, PlatformGemini, PlatformAntigravity, PlatformGrok:
-		return true
-	default:
-		return false
-	}
+	return accountType == AccountTypeAPIKey && domain.IsConcretePlatform(platform)
 }
 
 func isUpstreamBillingProbeAccount(account *Account) bool {
@@ -1002,6 +1029,9 @@ func isUpstreamBillingProbeAccount(account *Account) bool {
 // ollama.com is a first-class configuration here (Ollama Cloud accounts are
 // platform openai/anthropic with base_url https://ollama.com/v1), and it is
 // an official provider API just like the rest, so it belongs on this list.
+// CN provider domains (moonshot.cn / kimi.com / bigmodel.cn / deepseek.com)
+// serve the same role: official APIs that can never host /v1/sub2api/billing,
+// so their accounts short-circuit to "unsupported" without a request.
 var upstreamBillingProbeOfficialAPIDomains = []string{
 	"anthropic.com",
 	"googleapis.com",
@@ -1009,6 +1039,14 @@ var upstreamBillingProbeOfficialAPIDomains = []string{
 	"grok.com",
 	"openai.com",
 	"ollama.com",
+	"moonshot.cn",
+	"kimi.com",
+	"bigmodel.cn",
+	"deepseek.com",
+	"opencode.ai",
+	"typesafe.ai",
+	"commandcode.ai",
+	"cline.bot",
 }
 
 func upstreamBillingProbeTargetIsOfficialAPI(baseURL string) bool {
@@ -1060,6 +1098,12 @@ func (s *UpstreamBillingProbeService) currentTime() time.Time {
 }
 
 func nextProbeDelay(intervalMinutes int, retryAfterDuration time.Duration) time.Duration {
+	if retryAfterDuration < 0 {
+		retryAfterDuration = 0
+	}
+	if retryAfterDuration > upstreamBillingProbeMaxDelay {
+		retryAfterDuration = upstreamBillingProbeMaxDelay
+	}
 	interval := time.Duration(intervalMinutes) * time.Minute
 	if interval < upstreamBillingProbeMinIntervalMinutes*time.Minute {
 		interval = upstreamBillingProbeMinIntervalMinutes * time.Minute
@@ -1075,8 +1119,8 @@ func nextProbeDelay(intervalMinutes int, retryAfterDuration time.Duration) time.
 		interval += time.Duration(rand.Int64N(int64(jitterRange)*2+1)) - jitterRange
 	}
 	if retryAfterDuration > interval {
-		// Retry-After is an explicit upstream instruction; do not shorten it
-		// with the local maximum delay.
+		// Retry-After is an explicit upstream instruction; honor it over the
+		// local backoff interval, clamped to the same 24h ceiling.
 		return retryAfterDuration
 	}
 	if interval > upstreamBillingProbeMaxDelay {
@@ -1088,8 +1132,7 @@ func nextProbeDelay(intervalMinutes int, retryAfterDuration time.Duration) time.
 // unsupportedProbeDelay 拉长 unsupported 账号的重探间隔，让无效候选自然退出
 // 热队列，不再和真正接入 sub2api 的中转账号抢每周期的探测名额。
 // 仍按 upstreamBillingProbeMaxDelay 封顶，保证上游后来接入 sub2api 时最迟一天
-// 内会被重新发现；base 本身已达上限（例如 Retry-After 明确要求更久）时原样返回，
-// 不缩短上游指令。
+// 内会被重新发现；base 本身亦受 24h 封顶保护。
 func unsupportedProbeDelay(intervalMinutes int, retryAfterDuration time.Duration) time.Duration {
 	base := nextProbeDelay(intervalMinutes, retryAfterDuration)
 	if base >= upstreamBillingProbeMaxDelay {
